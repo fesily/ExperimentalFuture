@@ -91,7 +91,6 @@ struct FutureHook
 	constexpr static size_t VtDeconstorIndex = 0;
 	constexpr static size_t VtNotifyIndex = VtSize - 2;
 	constexpr static size_t VtEmptyIndex = VtSize - 1;
-	constexpr static intptr_t VtEmptyData = 0xFEEEFEEE;
 
 	constexpr static size_t OldVtIndex = VtSize;
 	constexpr static size_t DataIndex = OldVtIndex + 1;
@@ -121,14 +120,18 @@ struct FutureHook
 	static FutureThenData* HookFutureState(std::_Associated_state<T>* state, const std::shared_ptr<executor>& exec)
 	{
 		auto oldVt = *reinterpret_cast<intptr_t**>(state);
-		if (oldVt[VtEmptyIndex] == 0)
+		if (oldVt[VtDeconstorIndex] != unuon_cast<intptr_t>(&FutureHook::DeleteHook))
 		{
+			if (oldVt[VtEmptyIndex] != 0)
+			{
+				throw std::runtime_error("not't support this virtual table");
+			}
 			auto vt = new intptr_t[HookVtSize];
 			std::memcpy(vt, oldVt, sizeof(intptr_t) * VtSize);
 			vt[VtDeconstorIndex] = unuon_cast<intptr_t>(&FutureHook::DeleteHook);
 			vt[VtNotifyIndex] = unuon_cast<intptr_t>(&FutureHook::NotifyComplete);
 			vt[OldVtIndex] = (intptr_t)oldVt;
-			vt[VtEmptyIndex] = VtEmptyData;
+
 			auto data = new FutureThenData;
 			vt[DataIndex] = (intptr_t)data;
 			*reinterpret_cast<intptr_t**>(state) = vt;
