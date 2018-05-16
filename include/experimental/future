@@ -10,7 +10,7 @@ class shared_future;
 template<typename T>
 class promise;
 template<typename To, typename F>
-constexpr To unuon_cast(F ptr)
+constexpr To union_cast(F ptr)
 {
 	union Cast
 	{
@@ -110,7 +110,7 @@ struct FutureHook
 		auto vt = *reinterpret_cast<intptr_t**>(this);
 		auto oldVt = reinterpret_cast<intptr_t*>(vt[OldVtIndex]);
 
-		const auto notifyFn = unuon_cast<decltype(&FutureHook::NotifyComplete)>(oldVt[VtNotifyIndex]);
+		const auto notifyFn = union_cast<decltype(&FutureHook::NotifyComplete)>(oldVt[VtNotifyIndex]);
 		((*this).*notifyFn)(lock, atThreadExit);
 
 		auto data = reinterpret_cast<FutureThenData*>(vt[DataIndex]);
@@ -120,7 +120,7 @@ struct FutureHook
 	static FutureThenData* HookFutureState(std::_Associated_state<T>* state, const std::shared_ptr<executor>& exec)
 	{
 		auto oldVt = *reinterpret_cast<intptr_t**>(state);
-		if (oldVt[VtDeconstorIndex] != unuon_cast<intptr_t>(&FutureHook::DeleteHook))
+		if (oldVt[VtDeconstorIndex] != union_cast<intptr_t>(&FutureHook::DeleteHook))
 		{
 			if (oldVt[VtEmptyIndex] != 0)
 			{
@@ -128,8 +128,8 @@ struct FutureHook
 			}
 			auto vt = new intptr_t[HookVtSize];
 			std::memcpy(vt, oldVt, sizeof(intptr_t) * VtSize);
-			vt[VtDeconstorIndex] = unuon_cast<intptr_t>(&FutureHook::DeleteHook);
-			vt[VtNotifyIndex] = unuon_cast<intptr_t>(&FutureHook::NotifyComplete);
+			vt[VtDeconstorIndex] = union_cast<intptr_t>(&FutureHook::DeleteHook);
+			vt[VtNotifyIndex] = union_cast<intptr_t>(&FutureHook::NotifyComplete);
 			vt[OldVtIndex] = (intptr_t)oldVt;
 
 			auto data = new FutureThenData;
