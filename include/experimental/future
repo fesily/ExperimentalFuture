@@ -104,6 +104,7 @@ struct FutureHook
 
 	int DeleteHook(int f)
 	{
+		_ASSERT(f != 0);
 		intptr_t*& vt = *reinterpret_cast<intptr_t**>(this);
 		FutureHook* data = reinterpret_cast<FutureHook*>(vt[DataIndex]);
 
@@ -114,7 +115,6 @@ struct FutureHook
 		vt = oldVt;
 		hookPtr += DataIndex;
 		delete[] hookPtr;
-		assert(f == 1);
 		delete reinterpret_cast<std::_Associated_state<T>*>(this);
 		return 0;
 	}
