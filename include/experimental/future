@@ -83,26 +83,40 @@ struct FutureThenData
 		}
 	}
 };
+
 template<typename T>
 struct FutureHook
 {
-	constexpr static size_t VtSize = 7;
-	constexpr static size_t HookVtSize = VtSize + 2;
-	constexpr static size_t VtDeconstorIndex = 0;
-	constexpr static size_t VtNotifyIndex = VtSize - 2;
-	constexpr static size_t VtEmptyIndex = VtSize - 1;
+	constexpr static int VtSize = 6;
 
-	constexpr static size_t OldVtIndex = VtSize;
-	constexpr static size_t DataIndex = OldVtIndex + 1;
+	constexpr static int VtRealSize = VtSize + 1;
+	constexpr static int HookVtSize = VtRealSize + 1;
 
-	void DeleteHook()
+	constexpr static int VtRTTIIndex = -1;
+	constexpr static int DataIndex = -2;
+
+	constexpr static int VtDeconstorIndex = 0;
+	constexpr static int VtNotifyIndex = VtSize - 2;
+
+	intptr_t* originalVtPtr;
+	intptr_t* hookVtPtr;
+	FutureThenData data;
+
+	int DeleteHook(int f)
 	{
-		auto vt = *reinterpret_cast<intptr_t**>(this);
-		auto oldVt = reinterpret_cast<intptr_t*>(vt[OldVtIndex]);
-		delete reinterpret_cast<FutureThenData*>(vt[DataIndex]);
-		delete[] vt;
-		*reinterpret_cast<intptr_t**>(this) = oldVt;
+		intptr_t*& vt = *reinterpret_cast<intptr_t**>(this);
+		FutureHook* data = reinterpret_cast<FutureHook*>(vt[DataIndex]);
+
+		auto oldVt = data->originalVtPtr;
+		auto hookPtr = data->hookVtPtr;
+
+		delete data;
+		vt = oldVt;
+		hookPtr += DataIndex;
+		delete[] hookPtr;
+		assert(f == 1);
 		delete reinterpret_cast<std::_Associated_state<T>*>(this);
+		return 0;
 	}
 
 	void NotifyComplete(std::unique_lock<std::mutex> *lock, bool atThreadExit)
@@ -119,22 +133,17 @@ struct FutureHook
 
 	static FutureThenData* HookFutureState(std::_Associated_state<T>* state, const std::shared_ptr<executor>& exec)
 	{
-		auto oldVt = *reinterpret_cast<intptr_t**>(state);
+		intptr_t*& oldVt = *reinterpret_cast<intptr_t**>(state);
 		if (oldVt[VtDeconstorIndex] != union_cast<intptr_t>(&FutureHook::DeleteHook))
 		{
-			if (oldVt[VtEmptyIndex] != 0)
-			{
-				throw std::runtime_error("not't support this virtual table");
-			}
-			auto vt = new intptr_t[HookVtSize];
-			std::memcpy(vt, oldVt, sizeof(intptr_t) * VtSize);
+			auto copy = new intptr_t[HookVtSize];// first ptr is data, second rtti, third vfptr
+			auto vt = copy + (-DataIndex);
+			std::memcpy(copy + 1, oldVt - 1, sizeof(intptr_t) * VtRealSize);
 			vt[VtDeconstorIndex] = union_cast<intptr_t>(&FutureHook::DeleteHook);
 			vt[VtNotifyIndex] = union_cast<intptr_t>(&FutureHook::NotifyComplete);
-			vt[OldVtIndex] = (intptr_t)oldVt;
-
-			auto data = new FutureThenData;
-			vt[DataIndex] = (intptr_t)data;
-			*reinterpret_cast<intptr_t**>(state) = vt;
+			vt[DataIndex] = new FutureHook{ oldVt ,vt ,{} };
+			oldVt = vt;
+			auto data = vt[DataIndex];
 			data->execator = exec;
 			return data;
 		}
