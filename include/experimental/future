@@ -1,7 +1,11 @@
-#pragma once
+ï»¿#pragma once
 #include <future>
+
 namespace experimental
 {
+#pragma region config
+constexpr bool inheritExecutor = true;
+#pragma endregion
 namespace this_namespace = experimental;
 template<typename T>
 class future;
@@ -55,30 +59,36 @@ inline void SetDefaultFutureThenExecutor(std::shared_ptr<executor> ec)
 }
 #pragma endregion
 #pragma region hook
+
 struct FutureThenData
 {
 	std::function<void()> thenFunction;
 	std::function<void()> errorFunction;
 	std::shared_ptr<executor> execator{};
+
 	template<typename T>
 	void Exe(std::_Associated_state<T>* state)
 	{
-		// ±£Ö¤futureµÄÉúÃüÖÜÆÚÓÐÐ§
-		state->_Retain();
+		std::shared_ptr<std::_Associated_state<T>> ptr([=] {state->_Retain(); return state; }(), [](std::_Associated_state<T>* ptr) {
+			ptr->_Release();
+		});
+		// ä¿è¯futureçš„ç”Ÿå‘½å‘¨æœŸæœ‰æ•ˆ
 		if (state->_Exception != nullptr)
 		{
-			execator->submit([=, fn = std::move(errorFunction)]()
+			if (errorFunction == nullptr)
+				return;
+			execator->submit([ptr, fn = std::move(errorFunction)]()
 			{
 				fn();
-				state->_Release();
 			});
 		}
-		else
+		else 
 		{
-			execator->submit([=, fn = std::move(thenFunction)]()
+			if (thenFunction == nullptr)
+				return;
+			execator->submit([ptr, fn = std::move(thenFunction)]()
 			{
 				fn();
-				state->_Release();
 			});
 		}
 	}
@@ -96,7 +106,7 @@ struct FutureHook
 	constexpr static int DataIndex = -2;
 
 	constexpr static int VtDeconstorIndex = 0;
-	constexpr static int VtNotifyIndex = VtSize - 2;
+	constexpr static int VtNotifyIndex = VtSize - 1;
 
 	intptr_t* originalVtPtr;
 	intptr_t* hookVtPtr;
@@ -122,16 +132,17 @@ struct FutureHook
 	void NotifyComplete(std::unique_lock<std::mutex> *lock, bool atThreadExit)
 	{
 		auto vt = *reinterpret_cast<intptr_t**>(this);
-		auto oldVt = reinterpret_cast<intptr_t*>(vt[OldVtIndex]);
+		FutureHook* hook = reinterpret_cast<FutureHook*>(vt[DataIndex]);
+		_ASSERT(vt == hook->hookVtPtr);
+		auto oldVt = hook->originalVtPtr;
 
 		const auto notifyFn = union_cast<decltype(&FutureHook::NotifyComplete)>(oldVt[VtNotifyIndex]);
 		((*this).*notifyFn)(lock, atThreadExit);
 
-		auto data = reinterpret_cast<FutureThenData*>(vt[DataIndex]);
-		data->Exe<T>(reinterpret_cast<std::_Associated_state<T>*>(this));
+		hook->data.Exe<T>(reinterpret_cast<std::_Associated_state<T>*>(this));
 	}
 
-	static FutureThenData* HookFutureState(std::_Associated_state<T>* state, const std::shared_ptr<executor>& exec)
+	static FutureThenData* HookFutureState(std::_Associated_state<T>* state)
 	{
 		intptr_t*& oldVt = *reinterpret_cast<intptr_t**>(state);
 		if (oldVt[VtDeconstorIndex] != union_cast<intptr_t>(&FutureHook::DeleteHook))
@@ -141,15 +152,32 @@ struct FutureHook
 			std::memcpy(copy + 1, oldVt - 1, sizeof(intptr_t) * VtRealSize);
 			vt[VtDeconstorIndex] = union_cast<intptr_t>(&FutureHook::DeleteHook);
 			vt[VtNotifyIndex] = union_cast<intptr_t>(&FutureHook::NotifyComplete);
-			vt[DataIndex] = new FutureHook{ oldVt ,vt ,{} };
+			vt[DataIndex] = reinterpret_cast<intptr_t>(new FutureHook{ oldVt ,vt ,{} });
 			oldVt = vt;
-			auto data = vt[DataIndex];
-			data->execator = exec;
-			return data;
 		}
-		return reinterpret_cast<FutureThenData*>(oldVt[DataIndex]);
+		return std::addressof(reinterpret_cast<FutureHook*>(oldVt[DataIndex])->data);
 	}
 };
+template<typename T>
+FutureThenData* HookFutureState(std::_Associated_state<T>* state)
+{
+	return FutureHook<T>::HookFutureState(state);
+}
+inline void initThenExec(FutureThenData* hookdata, const std::shared_ptr<executor>& exec)
+{
+	if (hookdata->execator == nullptr)
+	{
+		if (exec == nullptr)
+			hookdata->execator = GetDefaultFutureThenExecutor();
+		else
+			hookdata->execator = exec;
+	}
+	else
+	{
+		if (exec != nullptr && hookdata->execator != exec)
+			hookdata->execator = exec;
+	}
+}
 #pragma endregion
 #pragma region details
 namespace details
@@ -191,12 +219,9 @@ struct is_shared_future
 }
 #pragma endregion
 template<typename Ret, typename T, typename Fn>
-future<Ret> thenImpl(std::_Associated_state<T>* impl, Fn&& func, const std::shared_ptr<executor>& exec)
+future<Ret> thenImpl(std::_Associated_state<T>* impl, FutureThenData* hookdata, Fn&& func)
 {
-	FutureThenData* hookdata = FutureHook<T>::HookFutureState(impl, exec);
-
 	auto pm = std::make_shared<promise<Ret>>();
-	auto ret = pm->get_future();
 	if constexpr(std::is_void_v<Ret>)
 	{
 		hookdata->thenFunction = [=, func = std::forward<Fn>(func)]()mutable
@@ -226,84 +251,96 @@ future<Ret> thenImpl(std::_Associated_state<T>* impl, Fn&& func, const std::shar
 			}
 		};
 	}
+	auto ret = pm->get_future();
+	if constexpr(inheritExecutor)
+	{
+		initThenExec(HookFutureState(ret._Ptr()), hookdata->execator);
+	}
 	return ret;
 }
 
 template<typename T, typename Fn>
-auto thenImpl1(std::_Associated_state<T>* impl, Fn&& func, const std::shared_ptr<executor>& exec)
+auto thenImpl1(std::_Associated_state<T>* impl, FutureThenData* hookdata, Fn&& func)
 {
 	using state_t = decltype(details::GetFutureStateType(impl));
 	if constexpr (std::is_invocable_v<Fn, future<T>>)
 	{
-		return thenImpl<std::invoke_result_t<Fn, future<T>>>(impl,
+		return thenImpl<std::invoke_result_t<Fn, future<T>>>(impl, hookdata,
 			[func = std::forward<Fn>(func)](std::_Associated_state<T>* ptr)
 		{
 			ptr->_Retain();
 			return func(future<T>{ std::_State_manager<state_t>{ptr, true}, std::_Nil{} });
-		}, exec);
+		});
 	}
 	else if constexpr (std::is_invocable_v<Fn, std::future<T>>)
 	{
-		return thenImpl<std::invoke_result_t<Fn, future<T>>>(impl,
+		return thenImpl<std::invoke_result_t<Fn, future<T>>>(impl, hookdata,
 			[func = std::forward<Fn>(func)](std::_Associated_state<T>* ptr)
 		{
 			ptr->_Retain();
 			return func(std::future<T>{ std::_State_manager<state_t>{ptr, true}, std::_Nil{} });
-		}, exec);
+		});
 	}
 	else if constexpr (std::is_invocable_v<Fn, shared_future<T>>)
 	{
-		return thenImpl<std::invoke_result_t<Fn, shared_future<T>>>(impl,
+		return thenImpl<std::invoke_result_t<Fn, shared_future<T>>>(impl, hookdata,
 			[func = std::forward<Fn>(func)](std::_Associated_state<T>* ptr)
 		{
 			ptr->_Retain();
 			return func(shared_future<T>{ std::_State_manager<state_t>{ptr, true}, std::_Nil{} });
-		}, exec);
+		});
 	}
 	else if constexpr (std::is_invocable_v<Fn, std::shared_future<T>>)
 	{
-		return thenImpl<std::invoke_result_t<Fn, shared_future<T>>>(impl,
+		return thenImpl<std::invoke_result_t<Fn, shared_future<T>>>(impl, hookdata,
 			[func = std::forward<Fn>(func)](std::_Associated_state<T>* ptr)
 		{
 			ptr->_Retain();
 			return func(std::shared_future<T>{ std::_State_manager<state_t>{ptr, true}, std::_Nil{} });
-		}, exec);
+		});
 	}
 	else if constexpr(std::is_invocable_v<Fn, T>)
 	{
-		return thenImpl<std::invoke_result_t<Fn, T>>(impl,
+		return thenImpl<std::invoke_result_t<Fn, T>>(impl, hookdata,
 			[func = std::forward<Fn>(func)](std::_Associated_state<T>* ptr)
 		{
 			return func(std::move(ptr->_Get_value(true)));
-		}, exec);
+		});
 	}
 	else
 	{
-		return thenImpl<void>(impl,
+		return thenImpl<void>(impl, hookdata,
 			[func = std::forward<Fn>(func)](std::_Associated_state<T>* ptr)
 		{
 			return func();
-		}, exec);
+		});
 	}
 }
+
 template<typename T, typename Fn>
-auto then(const future<T>& ft, Fn&& func, const std::shared_ptr<executor>& exec = GetDefaultFutureThenExecutor())
+auto then(const future<T>& ft, Fn&& func, const std::shared_ptr<executor>& exec)
 {
-	return thenImpl1<T>(ft._Ptr(), std::forward<Fn>(func), exec);
+	FutureThenData* hookdata = HookFutureState(ft._Ptr());
+	initThenExec(hookdata, exec);
+	return thenImpl1<T>(ft._Ptr(), hookdata, std::forward<Fn>(func));
 }
+
 template<typename T, typename Fn>
-auto then(const shared_future<T>& ft, Fn&& func, const std::shared_ptr<executor>& exec = GetDefaultFutureThenExecutor())
+auto then(const shared_future<T>& ft, Fn&& func, const std::shared_ptr<executor>& exec)
 {
-	return thenImpl1<T>(ft._Ptr(), std::forward<Fn>(func), exec);
+	FutureThenData* hookdata = HookFutureState(ft._Ptr());
+	initThenExec(hookdata, exec);
+	return thenImpl1<T>(ft._Ptr(), hookdata, std::forward<Fn>(func));
 }
 
 
 template<typename T, typename Fn>
-void error(const std::future<T>& ft, Fn&& func, const std::shared_ptr<executor>& exec = GetDefaultFutureThenExecutor())
+void error(const std::future<T>& ft, Fn&& func, const std::shared_ptr<executor>& exec)
 {
 	using state_t = decltype(details::GetFutureStateType(ft._Ptr()));
 	auto impl = ft._Ptr();
-	FutureThenData* hookdata = FutureHook<T>::HookFutureState(impl, exec);
+	FutureThenData* hookdata = FutureHook<T>::HookFutureState(impl);
+	initThenExec(hookdata, exec);
 	if constexpr(std::is_invocable_v<Fn, std::future<T>>)
 	{
 		hookdata->errorFunction = [impl, func = std::forward<Fn>(func)]()
@@ -369,13 +406,22 @@ public:
 		return this_namespace::get_exception(this->_Ptr());
 	}
 	template<typename Fn>
-	auto then(Fn&& fn, const std::shared_ptr<executor>& exec = GetDefaultFutureThenExecutor())
-		->decltype(this_namespace::then(*this, std::forward<Fn>(fn)))
+	auto then(Fn&& fn, const std::shared_ptr<executor>& exec = nullptr)
+		->decltype(this_namespace::then(*this, std::forward<Fn>(fn), exec))
 	{
-		return { this_namespace::then(*this, std::forward<Fn>(fn),exec) };
+		future local(std::move(*this));
+		try
+		{
+			return { this_namespace::then(local, std::forward<Fn>(fn),exec) };
+		}
+		catch (...)
+		{
+			*this = std::move(local);
+			throw;
+		}
 	}
 	template<typename Fn>
-	future& on_error(Fn&& fn, const std::shared_ptr<executor>& exec = GetDefaultFutureThenExecutor())
+	future& on_error(Fn&& fn, const std::shared_ptr<executor>& exec = nullptr)
 	{
 		this_namespace::error(*this, std::forward<Fn>(fn), exec);
 		return *this;
@@ -413,13 +459,13 @@ public:
 		return this_namespace::get_exception(this->_Ptr());
 	}
 	template<typename Fn>
-	auto then(Fn&& fn, const std::shared_ptr<executor>& exec = GetDefaultFutureThenExecutor())
-		->decltype(this_namespace::then(*this, std::forward<Fn>(fn)))
+	auto then(Fn&& fn, const std::shared_ptr<executor>& exec = nullptr)
+		->decltype(this_namespace::then(*this, std::forward<Fn>(fn), exec))
 	{
 		return { this_namespace::then(*this, std::forward<Fn>(fn),exec) };
 	}
 	template<typename Fn>
-	shared_future& on_error(Fn&& fn, const std::shared_ptr<executor>& exec = GetDefaultFutureThenExecutor())
+	shared_future& on_error(Fn&& fn, const std::shared_ptr<executor>& exec = nullptr)
 	{
 		void{ this_namespace::error(*this, std::forward<Fn>(fn),exec) };
 		return *this;

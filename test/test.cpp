@@ -97,19 +97,31 @@ void when_any_test2()
 }
 int main()
 {
-	experimental::promise<int> pm;
-	std::future<int> f = pm.get_future();
-	experimental::future<int> f1(std::move(f));
-	f1.then([]()
+
 	{
+		std::future<void> f2;
+		{
+			experimental::promise<int> pm;
+			std::future<int> f = pm.get_future();
+			experimental::future<int> f1(std::move(f));
+			f2 = f1.on_error([](std::exception_ptr) {
 
-	});
-	f1.on_error([](std::exception_ptr) {
+			}).then([]()
+			{
 
-	});
-	std::future<int> f2(std::move(f1));
+			});
+		}
+		try
+		{
+			f2.get();
+		}
+		catch (const std::exception&)
+		{
+
+		}
+	}
 	int a = 999;
-	while (a--)
+	while (a--) 
 	{
 		when_all_test2<std::promise<int>>();
 		when_all_test2<experimental::promise<int>>();
