@@ -8,16 +8,12 @@ void then_test1()
 		f = experimental::make_then(pm).then([](std::future<double> ft)
 		{
 			auto t = ft.get();
-			return (int)(t * t);
+			return int(t * t);
 		}).then([](int f)
 		{
 
 		});
 		pm.set_value(1234);
-	}
-	while (!f.is_ready())
-	{
-		std::this_thread::yield();
 	}
 	f.get();
 }
@@ -97,15 +93,15 @@ void when_any_test2()
 }
 int main()
 {
-
 	{
 		std::future<void> f2;
 		{
 			experimental::promise<int> pm;
 			std::future<int> f = pm.get_future();
 			experimental::future<int> f1(std::move(f));
-			f2 = f1.on_error([](std::exception_ptr) {
-
+			f2 = f1.on_error([](std::exception_ptr e)
+			{
+			 	auto ec =experimental::ErrorGetExceptionProcessor<std::exception>(e);
 			}).then([]()
 			{
 
@@ -121,7 +117,7 @@ int main()
 		}
 	}
 	int a = 999;
-	while (a--) 
+	while (a--)
 	{
 		when_all_test2<std::promise<int>>();
 		when_all_test2<experimental::promise<int>>();
@@ -131,8 +127,7 @@ int main()
 		when_any_test2<experimental::promise<int>>();
 		then_test1();
 	}
-	using namespace  std::chrono_literals;
+	using namespace std::chrono_literals;
 	std::this_thread::sleep_for(3s);
 	return 0;
 }
-
