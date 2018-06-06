@@ -218,25 +218,90 @@ struct is_shared_future
 #pragma region NotifyFutureComplate
 
 template<bool IsHandlerException, typename Promise, typename State>
-bool ExceptionHandler(const Promise& pm, State* lastFt)
+bool ExceptionHandler(Promise pm, State* lastFt)
 {
 	if constexpr(IsHandlerException)
 	{
 		if (has_exception(lastFt))
 		{
-			pm->set_exception(get_exception(lastFt));
+			pm.set_exception(get_exception(lastFt));
 			return true;
 		}
 	}
 	return false;
 }
+template<typename T>
+struct FutureCompletion
+{
+	using value_type = decltype(details::GetFutureStateType(std::declval<std::promise<T>>().get_future()._Ptr()));
+	using state_type = std::_Associated_state<value_type>;
+	FutureCompletion()
+		:state_(new state_type)
+	{
 
+	}
+	FutureCompletion(const FutureCompletion& cp) noexcept
+		:state_(cp.state_)
+	{
+		state_->_Retain();
+	}
+	FutureCompletion(FutureCompletion&& cp) noexcept
+		:state_(cp.state_)
+	{
+		cp.state_ = nullptr;
+	}
+	FutureCompletion& operator=(const FutureCompletion& cp)
+	{
+		if (state_ != nullptr)
+			state_->_Release();
+		state_ = cp.state_;
+		state_->_Retain();
+		return *this;
+	}
+	FutureCompletion& operator=(FutureCompletion&& cp)
+	{
+		if (state_ != nullptr)
+			state_->_Release();
+		state_ = cp.state_;
+		cp.state_ = nullptr;
+		return *this;
+	}
+	~FutureCompletion()
+	{
+		if (state_ != nullptr)
+			state_->_Release();
+	}
+
+	template<typename... T1>
+	void set_value(T1&&... value)
+	{
+		if constexpr(sizeof...(T1) == 0)
+		{
+			state_->_Set_value(1, false);
+		}
+		else
+		{
+			state_->_Set_value(std::forward<T1>(value)..., false);
+		}
+	}
+	void set_exception(std::exception_ptr ec)
+	{
+		state_->_Set_exception(ec, false);
+	}
+	future<T> get_future()
+	{
+		state_->_Retain();
+		return { std::_State_manager<value_type>{state_,true},std::_Nil{} };
+	}
+private:
+	state_type * state_;
+};
 template<bool IsHandlerException, typename Future>
 struct ThenNotifyHandler
 {
 	using T = decltype(details::GetFutureStateType(std::declval<Future>()._Ptr()));
 	template<typename Ret, typename Func>
-	void operator()(FutureThenData* data, std::shared_ptr<promise<Ret>> pm, Func&& func)const
+	void operator()(FutureThenData* data, FutureCompletion<Ret> pm, Func&& func)const
 	{
 		auto& hookFunc = IsHandlerException ? data->thenFunction : data->errorFunction;
 		if constexpr(std::is_void_v<Ret>)
@@ -248,11 +313,11 @@ struct ThenNotifyHandler
 				try
 				{
 					func(impl);
-					pm->set_value();
+					pm.set_value();
 				}
 				catch (...)
 				{
-					pm->set_exception(std::current_exception());
+					pm.set_exception(std::current_exception());
 				}
 			};
 		}
@@ -264,11 +329,11 @@ struct ThenNotifyHandler
 				if (ExceptionHandler<IsHandlerException>(pm, impl)) return;
 				try
 				{
-					pm->set_value(func(impl));
+					pm.set_value(func(impl));
 				}
 				catch (...)
 				{
-					pm->set_exception(std::current_exception());
+					pm.set_exception(std::current_exception());
 				}
 			};
 		}
@@ -278,11 +343,11 @@ struct ThenNotifyHandler
 template<typename Ret, typename NotifyHandler, typename T, typename Fn>
 future<Ret> HookNotifyImpl(NotifyHandler&& handler, std::_Associated_state<T>* impl, FutureThenData* hookdata, Fn&& func)
 {
-	auto pm = std::make_shared<promise<Ret>>();
+	FutureCompletion<Ret> pm;
 	handler(hookdata, pm, std::forward<Fn>(func));
 	if (impl->_Is_ready())
 		hookdata->Exe(impl);
-	auto ret = pm->get_future();
+	auto ret = pm.get_future();
 	if constexpr(inheritExecutor)
 	{
 		initThenExec(HookFutureState(ret._Ptr()), hookdata->execator);
